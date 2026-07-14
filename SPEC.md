@@ -8,8 +8,9 @@ A self-hosted **adult video manager**. Content is mostly JAV (~90%), plus wester
 It scrapes and stores video metadata, tracks a per-user library of owned files, and provides a
 desktop app for browsing, playback, file-watching, and file organization.
 
-Three backend modules — **scraper**, **information**, **storage** — built as a modular monolith
-(one repo, one role-selectable binary; splittable into services later).
+Backend modules — **scraper**, **information**, **storage**, **provider** (external-integration API +
+OpenAPI; consumed by a separate Jellyfin plugin repo) — built as a modular monolith (one repo, one
+role-selectable binary; splittable into services later), plus a desktop-side **organizer**.
 
 ## 2. Stack
 - **Backend:** Rust (async/tokio). axum (HTTP), sqlx (compile-time-checked queries, migrations
@@ -65,6 +66,13 @@ Run everything on one box now; split roles across processes/machines later with 
   started before `api` migrated (so start-order bugs surface loudly).
 - Escape hatch: `AUTO_MIGRATE=false` env + a `porna migrate` subcommand for ops who prefer a
   separate migration step.
+
+### health & shutdown
+- **`/health`** (process alive) and **`/ready`** (DB + Redis reachable, migrations applied) — for
+  container/orchestrator/proxy health checks.
+- **Graceful shutdown on SIGTERM:** `api` stops accepting new requests and drains in-flight ones;
+  `worker` stops claiming jobs and **releases any in-flight job back to `pending`** so a restart
+  doesn't leave it stuck `in_progress`.
 
 ## 4. Core parsing (crate `core`, shared by backend + Tauri app)
 - **JAV code normalization:** JAV codes are UPPERCASED (and trimmed/dash-normalized) before any
@@ -216,7 +224,10 @@ Retries with exponential backoff.
 default **Byparr** (Camoufox-based, speaks the FlareSolverr API so client code is provider-agnostic;
 swappable to FlareSolverr, or escalate to a solver API / real browser if a site goes full Turnstile).
 Nothing deployed yet → config points at a remote Byparr endpoint. Per-site config picks fetcher +
-rate limit; CF-bypass path gets a tighter limit.
+rate limit; CF-bypass path gets a tighter limit. Per-source config also has an optional outbound
+**`proxy`** (HTTP/SOCKS URL) — unset = direct — routing that source's requests (both plain and
+CF-bypass paths) through it, reserved for geoblocked sources (e.g. FANZA/DMM needs a JP IP) so
+enabling them later is config-only.
 
 ### sources & resolution chain (ordered per video_type; best-of-two)
 ```
@@ -304,9 +315,11 @@ library_items: id uuid pk, user_id -> users on delete cascade, location_id -> lo
                bitrate int,                         -- kbps  (ffprobe, cached)
                encoding text,                       -- codec: h264/h265/av1  (ffprobe, cached)
                duration int,                        -- seconds (file duration; distinct from videos.length_min)
-               present bool default true, added_at/last_seen_at,
+               added_at, last_seen_at,
                open_count int default 0, last_opened_at,   -- denormalized from play_events
                UNIQUE (user_id, location_id, file_path)
+  -- NO server-side filesystem state (no present/missing/unavailable). the server only stores
+  --   "what the app last reported the user has"; the desktop app is the source of truth (see sync).
   -- file-technical fields populated by ffprobe at scan (cached, refreshable on demand),
   --   not recomputed per query, so browse/sort/organizer-compare work even when the file is offline
   -- open_count/last_opened aggregate per (user, video_id) for display
@@ -331,9 +344,20 @@ api_keys: id uuid pk, user_id -> users on delete cascade, name, key_hash, prefix
 Not persisted in Postgres — computed on demand + cached in Redis under a per-user key, regenerated
 when expired. TTL default 24h, env-configurable (`REC_TTL_SECONDS`).
 
-### file-watch flow (frontend → backend)
-Watcher finds file → parse code from filename → classify video_type → ensure `videos` row exists
-(enqueue scrape on miss) → upsert `library_item`. Opening a file → insert `play_event` (+ counters).
+### library sync (desktop app ↔ backend)
+The **app is the source of truth** for what's on disk; the server just stores what the app reports.
+- **On startup / rescan:** app GETs the current library for its location(s), scans disk (running
+  ffprobe locally), computes the **diff**, and pushes **only changes**:
+  `POST /locations/{id}/sync { added:[…], removed:[path], changed:[…] }`
+  (chunked for large libraries; idempotent upsert by `(user, location, file_path)`).
+- **Live watching:** debounced delta batches of the same shape.
+- **Confidence is app-side:** the app only emits `removed` when it scanned an **accessible** location
+  and the file was genuinely gone. If a location is **unreachable it is skipped** (no diff) — nothing
+  is deleted on the server. That's why no server-side present/missing/unavailable state is needed.
+- New codes → server enqueues a scrape (best-of-two). `removed` → cascade-delete the `library_item`
+  (and its `play_events`; play history is not preserved across removal).
+- Opening a file → `POST` a play event → insert `play_event` + bump `open_count`/`last_opened_at`
+  (play-CLICK counter only; no playback-progress tracking).
 
 ## 8. Frontend
 Built as a **Vite + Svelte static SPA** (no SSR; there is no Node server in production — the Rust
@@ -358,6 +382,12 @@ is low-priority/optional.
 The served web UI **is** the portal: browser users authenticate via OIDC/proxy, browse, and
 generate/revoke API keys there. Desktop app either logs in via native OIDC+PKCE or the user pastes an
 API key once (stored in secure local storage). Single-user mode needs no portal.
+
+### desktop connection profile
+The Tauri app stores a **single connection profile** app-side: `server_url` + credential (API key or
+native OIDC+PKCE session). First run: enter server URL → authenticate → store in secure local storage.
+No multi-profile on the app — multi-*user* is purely a backend concern; the app talks to one server as
+one identity.
 
 ### repo layout
 Single monorepo (shared API request/response types kept in sync). `core/` is its own top-level dir
@@ -393,7 +423,30 @@ a box with the paths for always-on headless scheduling.
   size, resolution/details) → user chooses per conflict. Manual mode does a dry-run **preview** by
   default → user approves → execute. Scheduled mode runs live and logs every move.
 
-## 10. Testing, CI & release
+## 10. Provider / integrations module
+Exposes porna's metadata to external media servers **without writing sidecar files** (keeps the
+filesystem clean — a release already has many files). Instead, porna is a **live metadata source**.
+
+### provider API + OpenAPI (this repo, served by `api`)
+Thin, stable, documented view over existing data for external consumers; authed via `api_keys`.
+- `GET /provider/lookup?type=jav&code=ABC-123` → normalized metadata (title/title_original, actors,
+  genres, maker→studio, label, release_date, duration, plot) + image URLs (cover/poster, fanart,
+  screenshots) served from `AssetStore`.
+- `GET /provider/search?q=…` → candidate matches (for a media server's "identify"/manual search).
+- Missing on lookup → enqueue a scrape and return `202`/empty so the consumer retries on next refresh
+  (non-blocking).
+- **OpenAPI spec** published for the provider API (generated from the axum handlers, e.g. `utoipa`) —
+  and for the public API generally — so external consumers build against a versioned contract, not
+  shared code.
+
+### Jellyfin plugin — SEPARATE REPO
+The C#/.NET plugin implements Jellyfin's `IRemoteMetadataProvider` + `IRemoteImageProvider`, configured
+with the porna **server URL + API key**. It parses the JAV code from the filename, calls the provider
+API, and feeds metadata + images into Jellyfin. It lives in its **own repository** with its own .NET
+CI/release (Jellyfin plugin manifest), and builds its client from porna's **OpenAPI spec** (codegen).
+No code is shared with this repo, so it does not belong in this monorepo. (No sidecar `.nfo`/artwork.)
+
+## 11. Testing, CI & release
 - **TDD is mandatory** (see `CLAUDE.md` RULE #0): test first, never edit a test to pass code without
   explicit permission.
 - **Tests:** pure `core` logic (normalizer/classifier/parser/templates) = plain unit tests, no DB.
@@ -408,7 +461,7 @@ a box with the paths for always-on headless scheduling.
   → final). Tags: `edge` on push to main, `:version`+`:latest` on release, multi-arch on release.
   **Tauri desktop** is a separate release job (`tauri-action`, per-OS artifacts → GitHub release).
 
-## 11. Assumptions / open items
+## 12. Assumptions / open items
 - Deployment: single-machine / self-hosted for now; storage is per-user-per-location so multi-user
   can be added later.
 - Concrete per-site scraping parse logic: provided as each source is implemented.

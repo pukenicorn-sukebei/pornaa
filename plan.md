@@ -44,6 +44,7 @@ Local dev, NO docker; Postgres/Redis/Byparr are remote, configured via env.
 - [ ] auto-migrate on startup (api role only, pg_advisory_lock; AUTO_MIGRATE opt-out + `porna migrate`)
 - [ ] `.sqlx` offline cache committed (SQLX_OFFLINE builds)
 - [ ] clap `run --role ...` wiring (api/worker/webui/all), no logic yet
+- [ ] /health + /ready endpoints; SIGTERM graceful shutdown (api drains; worker releases in-flight jobs)
 - [ ] deploy.yml + multi-stage Dockerfile (node builds web → rust builds backend → one image
       `ghcr.io/<owner>/porna`); Tauri desktop release job (tauri-action)
 
@@ -87,6 +88,8 @@ Foundational — everything downstream depends on correct code extraction/classi
 - [ ] JIT user provisioning; admin role from env list / group claim
 - [ ] locations, library_items (+ part_no, is_uncensored, ffprobe fields: resolution/bitrate/encoding/duration)
 - [ ] play_events + open_count/last_opened_at (play-CLICK counter; no playback-progress tracking)
+- [ ] library sync API: POST /locations/{id}/sync {added,removed,changed} (chunked, idempotent);
+      app pulls→diffs→pushes; no server-side fs state; removed → cascade delete
 - [ ] favorites (videos, persons — separate tables), user_video_ratings
 - [ ] api_keys (mint/list/revoke) + portal endpoints
 - [ ] recommendations: on-demand compute + Redis cache (TTL default 24h, env)
@@ -95,6 +98,7 @@ Foundational — everything downstream depends on correct code extraction/classi
 - [ ] REST endpoints: get video by (type, code) → enqueue on miss; browse/filter
       (genre/actor/maker/label, owned/not-owned); search; favorites; ratings; force-scrape
 - [ ] serve web UI bundle + portal; pagination/filter conventions
+- [ ] OpenAPI spec generation (utoipa) for the public API
 
 ### M7 — frontend
 - [ ] web UI (browse/search/metadata/favorites/recs); capability gating (window.__TAURI__)
@@ -112,7 +116,14 @@ Foundational — everything downstream depends on correct code extraction/classi
 - [ ] subscriptions (per-user; global dedup) by person/maker/label
 - [ ] new_release_discovery jobs via entity_external_ids.list_url → enqueue scrapes
 
-### M10 — polish / optional
+### M10 — provider / integrations (this repo)
+- [ ] provider API: `/provider/lookup` (metadata + image URLs), `/provider/search`;
+      scrape-on-miss → 202; authed via api_keys
+- [ ] publish OpenAPI spec for the provider API (external consumers build against the contract)
+- note: the **Jellyfin plugin is a SEPARATE repo** (C#/.NET, own CI/release, codegen from OpenAPI);
+  nothing shared, so it's out of this monorepo's build scope
+
+### M11 — polish / optional
 - [ ] S3-compatible AssetStore impl (DO Spaces)
 - [ ] genre normalization review workflow (hybrid keying + merge)
 - [ ] merge admin UI
