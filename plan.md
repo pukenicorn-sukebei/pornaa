@@ -3,6 +3,44 @@
 Living roadmap. Source of truth for requirements is **`SPEC.md`**; this file is the *how/when*.
 Check items off as they land. Decisions in `SPEC.md` win on any conflict.
 
+## handoff notes (read first)
+Starting point for whoever picks up the build (likely Sonnet).
+
+- **Read order:** `CLAUDE.md` (esp. RULE #0) → `SPEC.md` (source of truth) → this file.
+- **RULE #0 is absolute:** TDD. Write the failing test first, then code. **Never edit a test to make
+  code pass** without explicit user permission. This is the #1 thing to not cut corners on.
+- **Dev env:** local, **no docker**. Postgres/Redis/Byparr are **remote via env**. Put `PG_*` /
+  `REDIS_*` (or `DATABASE_URL` / `REDIS_URL`) in `.env`; test inherits workload components, test DB
+  defaults to `pornaa-test`, test redis db `1`. (`*_URL` wins over components.)
+- **Where to start:** M1, top of the checklist. First failing test = `core` config resolution
+  (`*_URL`-or-components) — pure logic, no DB. Then pools, `.env.example`, `AssetStore`, migrations.
+- **Migrations:** additive only, never edit an applied one; single-owner (see parallelization map);
+  commit the `.sqlx` offline cache. Auto-migrate runs on startup (api role, advisory-lock).
+- **Commits:** conventional style, end messages with the `Co-Authored-By: Claude ...` trailer.
+  Commit/push when the user asks or at milestone boundaries; keep `main` green (CI must pass).
+- **Model split:** Sonnet drives; escalate to Opus for the spiky bits (queue `SKIP LOCKED`
+  concurrency, auth middleware, multi-source resolution, design pivots, stuck tests, milestone review).
+
+## parallelization map
+Do the **trunk sequentially, solo**; **fan out** only after it's stable.
+
+- **TRUNK (sequential, single-owner — the "coordinator"):**
+  - **M1 foundation → M2 core parsing → M3 information module.**
+  - The coordinator **exclusively owns** the collision-prone shared surface for the whole project:
+    `migrations/`, `core/`, the workspace `Cargo.toml`, and the `.sqlx` cache. All migration/core
+    changes funnel through it even during fan-out.
+  - Lock the **API contract early** (OpenAPI via utoipa + `ts-rs` types) so downstream legs are stable.
+- **FAN-OUT (after M3, each in its own git worktree, one crate/area per worker):**
+  - **M4 scraper** → `backend/scraper` (+ source clients)
+  - **M5 storage** → `backend/storage`
+  - **M6 API** → `backend/api` (depends on M4/M5 interfaces; start against contract stubs)
+  - **M7 frontend** → `frontend/web` + `frontend/app` (against the OpenAPI/ts-rs contract)
+  - **M9 discovery**, **M10 provider API** → slot onto whoever owns scraper/api
+  - **Jellyfin plugin** → **separate repo**, fully independent, its own .NET CI/release
+- **Ownership boundaries:** one worker per crate; no two workers edit the same crate. Anything
+  touching `migrations/` / `core/` / workspace root goes through the coordinator to avoid ordering
+  and ripple conflicts. Coordinator reviews every merge for RULE #0 adherence.
+
 ## stack (see SPEC.md)
 - backend: Rust (axum · sqlx · reqwest/scraper · clap), one role-selectable binary
 - data: Postgres (durable state + job queue), Redis (cache + rate-limit token buckets)
