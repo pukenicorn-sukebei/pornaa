@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/target/
+Cargo.lock            # library crates; keep if a binary-only workspace (revisit at M1)
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Downloaded media assets
+/asset/
+/assets/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Tauri
+apps/desktop/target/
+apps/desktop/gen/
+
+# sqlx offline cache is committed (.sqlx/) — do NOT ignore it
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+# backend + frontend ship together, so run both in parallel every time.
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: porna
+          POSTGRES_PASSWORD: porna
+          POSTGRES_DB: porna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U porna"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # compile against the committed .sqlx offline cache; tests connect at runtime.
+      SQLX_OFFLINE: "true"
+      # sqlx::test uses DATABASE_URL as the admin conn to create/drop ephemeral test DBs
+      # (POSTGRES_USER is a superuser in the service container, so it can CREATE DATABASE).
+      DATABASE_URL: postgres://porna:porna@localhost:5432/porna_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all --all-features
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check --if-present    # svelte-check
+      - run: npx prettier --check '**/*.{ts,js,svelte,css,html}' --ignore-path .gitignore
+      - run: npm test --if-present         # vitest
+      - run: npm run build                 # vite build
