@@ -317,6 +317,7 @@ library_items: id uuid pk, user_id -> users on delete cascade, location_id -> lo
                duration int,                        -- seconds (file duration; distinct from videos.length_min)
                added_at, last_seen_at,
                open_count int default 0, last_opened_at,   -- denormalized from play_events
+               ignored bool default false,          -- user marked "don't try to match" (junk/non-media)
                UNIQUE (user_id, location_id, file_path)
   -- NO server-side filesystem state (no present/missing/unavailable). the server only stores
   --   "what the app last reported the user has"; the desktop app is the source of truth (see sync).
@@ -342,7 +343,9 @@ api_keys: id uuid pk, user_id -> users on delete cascade, name, key_hash, prefix
 
 ### recommendations ("video / actor of the day")
 Not persisted in Postgres — computed on demand + cached in Redis under a per-user key, regenerated
-when expired. TTL default 24h, env-configurable (`REC_TTL_SECONDS`).
+when expired. TTL default 24h, env-configurable (`REC_TTL_SECONDS`). The **ranking logic is defined at
+implementation** (M5) — likely weighting open_count, favorites, recency, and actor affinity; the
+plumbing (compute-on-demand + cache) is fixed, the algorithm is not yet.
 
 ### library sync (desktop app ↔ backend)
 The **app is the source of truth** for what's on disk; the server just stores what the app reports.
@@ -358,6 +361,15 @@ The **app is the source of truth** for what's on disk; the server just stores wh
   (and its `play_events`; play history is not preserved across removal).
 - Opening a file → `POST` a play event → insert `play_event` + bump `open_count`/`last_opened_at`
   (play-CLICK counter only; no playback-progress tracking).
+
+### manual identification / override
+Not every file has a clean, parseable code, and fuzzy matches can be wrong. So the user can fix a
+`library_item` directly:
+- **unidentified** = `video_id IS NULL AND NOT ignored` — surfaced in the UI for the user to resolve.
+- **assign/override:** set the correct `(video_type, code)` or an existing `video_id` on the item
+  → ensures/creates the video (scrape on miss) → re-links. Clears `needs_review`.
+- **ignore:** set `ignored=true` to drop junk/non-media files out of the unidentified list.
+- **force re-scrape:** available per item/video (ties into the force-scrape API).
 
 ## 8. Frontend
 Built as a **Vite + Svelte static SPA** (no SSR; there is no Node server in production — the Rust

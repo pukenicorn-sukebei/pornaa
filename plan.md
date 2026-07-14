@@ -90,6 +90,8 @@ Foundational — everything downstream depends on correct code extraction/classi
 - [ ] play_events + open_count/last_opened_at (play-CLICK counter; no playback-progress tracking)
 - [ ] library sync API: POST /locations/{id}/sync {added,removed,changed} (chunked, idempotent);
       app pulls→diffs→pushes; no server-side fs state; removed → cascade delete
+- [ ] manual identification: assign/override video for a library_item (code or video_id),
+      ignore flag, force re-scrape; "unidentified" = video_id null & not ignored
 - [ ] favorites (videos, persons — separate tables), user_video_ratings
 - [ ] api_keys (mint/list/revoke) + portal endpoints
 - [ ] recommendations: on-demand compute + Redis cache (TTL default 24h, env)
